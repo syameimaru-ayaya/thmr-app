@@ -11,6 +11,8 @@ class MainFlutterWindow: NSWindow {
     self.center()
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    MediaControls.shared.attach(
+      messenger: flutterViewController.engine.binaryMessenger)
 
     super.awakeFromNib()
   }

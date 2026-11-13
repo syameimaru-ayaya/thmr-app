@@ -1,7 +1,7 @@
 name: thmr_app
 description: "东方音乐电台 THMR Flutter 客户端"
 publish_to: "none"
-version: 0.1.5+1
+version: 0.1.9+1
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -59,6 +59,7 @@ dependencies:
   archive: ^4.3.0
   path: ^1.9.1
   path_provider: ^2.1.5
+  file_picker: ^11.0.3
 
 dev_dependencies:
   flutter_test:

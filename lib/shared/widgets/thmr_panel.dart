@@ -30,11 +30,15 @@ class ThmrPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tokens = Theme.of(context).thmr;
+    final theme = Theme.of(context);
+    final tokens = theme.thmr;
+    // The page already washes out the artwork. Light paper needs a lighter
+    // tint so the blurred silhouette can still show through both layers.
+    final frostOpacity = theme.brightness == Brightness.light ? 0.60 : 0.80;
     final body = Container(
       decoration: BoxDecoration(
         color: frost
-            ? tokens.panelBg.withValues(alpha: 0.80)
+            ? tokens.panelBg.withValues(alpha: frostOpacity)
             : tokens.solidPanel.withValues(alpha: 0.86),
         borderRadius: BorderRadius.circular(borderRadius),
         border: Border.all(color: tokens.panelBorder),
@@ -45,9 +49,13 @@ class ThmrPanel extends StatelessWidget {
     final panel = frost
         ? ClipRRect(
             borderRadius: BorderRadius.circular(borderRadius),
-            child: BackdropFilter(
+            child: BackdropFilter.grouped(
               filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-              child: body,
+              // FadeTransition uses a save layer. Replace its filtered input
+              // instead of blending that backdrop into the layer twice.
+              blendMode: BlendMode.src,
+              // Nested frosted panels must not share their parent's backdrop.
+              child: BackdropGroup(child: body),
             ),
           )
         : ClipRRect(
@@ -110,22 +118,23 @@ class SectionHeader extends StatelessWidget {
   }
 }
 
-/// LIVE 徽标:红点呼吸 + LIVE 字样。
+/// 电台放送状态徽标。
 class LiveBadge extends StatelessWidget {
-  const LiveBadge({super.key, this.active = true});
+  const LiveBadge({super.key, this.active = true, this.switching = false});
 
   final bool active;
+  final bool switching;
 
   @override
   Widget build(BuildContext context) {
-    final color = active
+    final color = active && !switching
         ? Theme.of(context).colorScheme.primary
         : Theme.of(context).thmr.mutedInk;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(6),
         border: Border.all(color: color.withValues(alpha: 0.4)),
       ),
       child: Row(
@@ -138,7 +147,7 @@ class LiveBadge extends StatelessWidget {
           ),
           const SizedBox(width: 5),
           Text(
-            active ? '放送中' : '待机',
+            switching ? '切换中' : (active ? '放送中' : '待机'),
             style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: color,
                   fontWeight: FontWeight.w700,

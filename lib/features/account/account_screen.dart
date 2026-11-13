@@ -1,6 +1,6 @@
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/platform/desktop_window.dart';
@@ -10,15 +10,50 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../core/state/auth_provider.dart';
 import '../../core/state/settings_provider.dart';
 import '../../core/theme/thmr_theme.dart';
+import '../../core/theme/thmr_colors.dart' show ThmrTokens;
 import '../../core/update/app_update.dart';
 import '../../shared/widgets/thmr_panel.dart';
 import 'about_panel.dart';
 import 'login_screen.dart';
 import 'update_panel.dart';
+import 'radio_source_panel.dart';
+import '../diagnostics/diagnostics_screen.dart';
 
 /// 「我的」:账号(WebView 登录 M2 接入)+ 偏好设置 + 关于。
-class AccountScreen extends ConsumerWidget {
+class AccountScreen extends ConsumerStatefulWidget {
   const AccountScreen({super.key});
+
+  @override
+  ConsumerState<AccountScreen> createState() => _AccountScreenState();
+}
+
+class _AccountScreenState extends ConsumerState<AccountScreen> {
+  int _appearanceRevision = 0;
+  ThemeMode? _pendingMode;
+  AccentTheme? _pendingAccent;
+
+  Future<void> _selectAppearance({ThemeMode? mode, AccentTheme? accent}) async {
+    final current = ref.read(settingsProvider);
+    final targetMode = _pendingMode = mode ?? _pendingMode ?? current.themeMode;
+    final targetAccent =
+        _pendingAccent = accent ?? _pendingAccent ?? current.accentTheme;
+    final request = ++_appearanceRevision;
+    final brightness = switch (targetMode) {
+      ThemeMode.light => Brightness.light,
+      ThemeMode.dark => Brightness.dark,
+      ThemeMode.system => MediaQuery.platformBrightnessOf(context),
+    };
+    final asset = ThmrTokens.resolve(targetAccent, brightness).illustration;
+    // Decode before changing ThemeData so image loading does not eat the
+    // first frames of the existing colour/illustration transition.
+    await precacheImage(AssetImage(asset), context);
+    if (!mounted || request != _appearanceRevision) return;
+    _pendingMode = null;
+    _pendingAccent = null;
+    await ref
+        .read(settingsProvider.notifier)
+        .setAppearance(targetMode, targetAccent);
+  }
 
   /// Keep the login flow on this screen: the signed-out card is replaced as
   /// soon as authentication succeeds, while this context remains mounted.
@@ -60,7 +95,7 @@ class AccountScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
     final settings = ref.watch(settingsProvider);
     final miniSize = ref.watch(miniPlayerSizeProvider);
@@ -112,8 +147,7 @@ class AccountScreen extends ConsumerWidget {
                         label: Text('跟随')),
                   ],
                   selected: {settings.themeMode},
-                  onSelectionChanged: (s) =>
-                      ref.read(settingsProvider.notifier).setThemeMode(s.first),
+                  onSelectionChanged: (s) => _selectAppearance(mode: s.first),
                 ),
               ],
             ),
@@ -135,9 +169,7 @@ class AccountScreen extends ConsumerWidget {
                     for (final t in AccentTheme.values)
                       ChoiceChip(
                         selected: settings.accentTheme == t,
-                        onSelected: (_) => ref
-                            .read(settingsProvider.notifier)
-                            .setAccentTheme(t),
+                        onSelected: (_) => _selectAppearance(accent: t),
                         label: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -262,7 +294,9 @@ class AccountScreen extends ConsumerWidget {
                         Text(
                             ref.watch(desktopTrayAvailableProvider)
                                 ? '点击窗口关闭键时的行为'
-                                : '托盘不可用时，最小化操作将保留在任务栏',
+                                : defaultTargetPlatform == TargetPlatform.macOS
+                                    ? '菜单栏图标不可用时，最小化操作将保留在 Dock'
+                                    : '托盘不可用时，最小化操作将保留在任务栏',
                             style: Theme.of(context)
                                 .textTheme
                                 .labelSmall
@@ -276,10 +310,9 @@ class AccountScreen extends ConsumerWidget {
                                 label: Text(switch (a) {
                                   CloseAction.ask => '每次询问',
                                   CloseAction.exit => '退出程序',
-                                  CloseAction.tray =>
-                                    ref.watch(desktopTrayAvailableProvider)
-                                        ? '最小化到托盘'
-                                        : '最小化到任务栏',
+                                  CloseAction.tray => desktopTrayActionLabel(
+                                      available: ref
+                                          .watch(desktopTrayAvailableProvider)),
                                 }),
                                 selected: settings.closeAction == a,
                                 onSelected: (_) => ref
@@ -331,6 +364,34 @@ class AccountScreen extends ConsumerWidget {
               ),
             ),
           ],
+          const SizedBox(height: 18),
+          const SectionHeader(title: '播放与网络'),
+          const RadioSourcePanel(),
+          const SizedBox(height: 10),
+          ThmrPanel(
+            onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+              builder: (_) => const DiagnosticsScreen(),
+            )),
+            child: Row(children: [
+              Icon(Icons.network_check_rounded,
+                  color: tokens.mutedInk, size: 22),
+              const SizedBox(width: 12),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Text('网络诊断', style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 4),
+                    Text('检查服务连接、CDN 节点与本机环境，导出 TXT 报告',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: tokens.mutedInk)),
+                  ])),
+              const SizedBox(width: 8),
+              Icon(Icons.chevron_right_rounded, color: tokens.mutedInk),
+            ]),
+          ),
           if (supportsAppUpdates) ...[
             const SizedBox(height: 18),
             const SectionHeader(title: '应用更新'),
@@ -581,12 +642,26 @@ Color _accentDot(AccentTheme t) => switch (t) {
       AccentTheme.reimu => const Color(0xFFC65A69),
       AccentTheme.marisa => const Color(0xFFD9A43C),
       AccentTheme.cirno => const Color(0xFF4E9FD4),
+      AccentTheme.tenshi => const Color(0xFF5C6BB0),
+      AccentTheme.sanae => const Color(0xFF4E9E62),
+      AccentTheme.koishi => const Color(0xFF8E6FA8),
+      AccentTheme.remilia => const Color(0xFFAE3548),
+      AccentTheme.satori => const Color(0xFFA86492),
+      AccentTheme.hearn => const Color(0xFF7C5AB4),
+      AccentTheme.renko => const Color(0xFFBE6B4A),
     };
 
 String _accentLabel(AccentTheme t) => switch (t) {
       AccentTheme.reimu => '灵梦 · 绯红',
       AccentTheme.marisa => '魔理沙 · 星尘',
       AccentTheme.cirno => '琪露诺 · 冰蓝',
+      AccentTheme.tenshi => '天子 · 绀蓝',
+      AccentTheme.sanae => '早苗 · 青风',
+      AccentTheme.koishi => '恋恋 · 紫瞳',
+      AccentTheme.remilia => '蕾米莉亚 · 猩红',
+      AccentTheme.satori => '觉 · 藕荷',
+      AccentTheme.hearn => '梅莉 · 梦紫',
+      AccentTheme.renko => '莲子 · 星轨',
     };
 
 /// Nickname editor dialog shared by settings & first-login gate.

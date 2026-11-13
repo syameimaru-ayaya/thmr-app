@@ -35,6 +35,8 @@ jobs:
       - uses: subosito/flutter-action@v2
         id: flutter
         with:
+          # Keep validation and every platform build on the verified SDK.
+          flutter-version: '3.47.5'
           channel: stable
           cache: true
       - name: Resolve the version for every client
@@ -107,6 +109,43 @@ jobs:
           flutter-version: ${{ needs.validate.outputs.flutter_version }}
           channel: stable
           cache: true
+      - name: Select a reachable Ubuntu mirror
+        run: |
+          # Hosted runners map Ubuntu suites to azure.archive.ubuntu.com through a
+          # mirrorlist. When that host does not resolve, every package download
+          # stalls. Pick the first reachable full mirror and relax apt timeouts.
+          mirrors=(
+            https://mirrors.edge.kernel.org/ubuntu
+            https://mirror.math.princeton.edu/pub/ubuntu
+            https://ftp.osuosl.org/pub/ubuntu
+            https://mirrors.aliyun.com/ubuntu
+            https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+            https://mirrors.ustc.edu.cn/ubuntu
+            https://mirrors.cloud.tencent.com/ubuntu
+            https://archive.ubuntu.com/ubuntu
+            https://security.ubuntu.com/ubuntu
+          )
+          picked=
+          for mirror in "${mirrors[@]}"; do
+            if curl -fsSL --max-time 12 -o /dev/null "$mirror/dists/noble/InRelease" &&
+               curl -fsSL --max-time 12 -o /dev/null "$mirror/dists/noble-security/InRelease"; then
+              picked=$mirror
+              break
+            fi
+          done
+          if [ -z "$picked" ]; then
+            echo "No reachable Ubuntu mirror found" >&2
+            exit 1
+          fi
+          echo "Using Ubuntu mirror: $picked"
+          for file in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+            if [ -f "$file" ]; then
+              sudo sed -i -E "s|mirror\+file:/etc/apt/apt-mirrors\.txt|$picked/|g" "$file"
+            fi
+          done
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' \
+            | sudo tee /etc/apt/apt.conf.d/zz-thmr-apt >/dev/null
+          grep -n 'URIs:' /etc/apt/sources.list.d/ubuntu.sources || true
       - name: Install native dependencies
         run: |
           sudo apt-get update
@@ -159,8 +198,12 @@ jobs:
 
   macos:
     needs: [validate, prepare_release]
-    # The arm64 pool currently fails to acquire runners. Intel still builds both architectures.
-    runs-on: ${{ vars.THMR_MACOS_RUNNER || 'macos-26-intel' }}
+    # Plain macos-* labels are Apple Silicon (macos-26 = arm64); the -intel
+    # suffix is the Intel fallback. The earlier "cannot acquire a runner"
+    # episodes came from the retired macos-14 label, not a capacity shortage.
+    # Universal output is unchanged: ARCHS_STANDARD still builds both slices.
+    runs-on: macos-26
+    timeout-minutes: 60
     permissions:
       contents: write
     steps:

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../theme/thmr_colors.dart';
+import '../network/radio_sources.dart';
 
 /// 点窗口关闭按钮时的行为(桌面端)。
 enum CloseAction {
@@ -55,10 +56,12 @@ final miniPlayerSizeProvider =
 class AppSettings {
   final ThemeMode themeMode;
   final Map<String, String> bitrateByStation;
+  final String? selectedStationId;
   final bool autoPlay;
   final AccentTheme accentTheme;
   final MiniEdgeHideMode miniEdgeHideMode;
   final bool miniShowIllustration;
+  final RadioSourcePreference radioSource;
 
   /// 关闭按钮行为(仅桌面端生效)。
   final CloseAction closeAction;
@@ -66,11 +69,13 @@ class AppSettings {
   const AppSettings({
     this.themeMode = ThemeMode.system,
     this.bitrateByStation = const {},
+    this.selectedStationId,
     this.autoPlay = false,
     this.accentTheme = AccentTheme.reimu,
     this.miniEdgeHideMode = MiniEdgeHideMode.compact,
     this.miniShowIllustration = true,
     this.closeAction = CloseAction.ask,
+    this.radioSource = RadioSourcePreference.automatic,
   });
 
   String bitrateFor(String stationId) => bitrateByStation[stationId] ?? '';
@@ -78,20 +83,24 @@ class AppSettings {
   AppSettings copyWith({
     ThemeMode? themeMode,
     Map<String, String>? bitrateByStation,
+    String? selectedStationId,
     bool? autoPlay,
     AccentTheme? accentTheme,
     MiniEdgeHideMode? miniEdgeHideMode,
     bool? miniShowIllustration,
     CloseAction? closeAction,
+    RadioSourcePreference? radioSource,
   }) =>
       AppSettings(
         themeMode: themeMode ?? this.themeMode,
         bitrateByStation: bitrateByStation ?? this.bitrateByStation,
+        selectedStationId: selectedStationId ?? this.selectedStationId,
         autoPlay: autoPlay ?? this.autoPlay,
         accentTheme: accentTheme ?? this.accentTheme,
         miniEdgeHideMode: miniEdgeHideMode ?? this.miniEdgeHideMode,
         miniShowIllustration: miniShowIllustration ?? this.miniShowIllustration,
         closeAction: closeAction ?? this.closeAction,
+        radioSource: radioSource ?? this.radioSource,
       );
 }
 
@@ -121,6 +130,11 @@ class SettingsController extends StateNotifier<AppSettings> {
     );
     state = AppSettings(
       autoPlay: autoPlay,
+      selectedStationId: prefs.getString('selectedStationId'),
+      radioSource: RadioSourcePreference.values.firstWhere(
+        (source) => source.name == prefs.getString('radioSource'),
+        orElse: () => RadioSourcePreference.automatic,
+      ),
       accentTheme:
           AccentTheme.values[accentIdx.clamp(0, AccentTheme.values.length - 1)],
       closeAction: closeAction,
@@ -144,6 +158,16 @@ class SettingsController extends StateNotifier<AppSettings> {
     await prefs.setInt('themeMode', mode.index);
   }
 
+  Future<void> setAppearance(ThemeMode mode, AccentTheme accent) async {
+    _revision++;
+    state = state.copyWith(themeMode: mode, accentTheme: accent);
+    final prefs = await SharedPreferences.getInstance();
+    await Future.wait([
+      prefs.setInt('themeMode', mode.index),
+      prefs.setInt('accentTheme', accent.index),
+    ]);
+  }
+
   Future<void> setAccentTheme(AccentTheme theme) async {
     _revision++;
     state = state.copyWith(accentTheme: theme);
@@ -156,6 +180,13 @@ class SettingsController extends StateNotifier<AppSettings> {
     state = state.copyWith(autoPlay: value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('autoPlay', value);
+  }
+
+  Future<void> setRadioSource(RadioSourcePreference source) async {
+    _revision++;
+    state = state.copyWith(radioSource: source);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('radioSource', source.name);
   }
 
   /// 记住关闭按钮行为(「不再提醒」时写入)。
@@ -188,6 +219,14 @@ class SettingsController extends StateNotifier<AppSettings> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('bitrateByStation',
         next.entries.map((e) => '${e.key}=${e.value}').toList());
+  }
+
+  Future<void> selectStation(String stationId) async {
+    if (state.selectedStationId == stationId) return;
+    _revision++;
+    state = state.copyWith(selectedStationId: stationId);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('selectedStationId', stationId);
   }
 }
 

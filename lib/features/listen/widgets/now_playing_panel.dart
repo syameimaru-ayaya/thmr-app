@@ -1,18 +1,20 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/radio_api.dart';
-import '../../../core/config.dart';
 import '../../../core/models/models.dart';
 import '../../../core/player/playback_controller.dart';
 import '../../../core/player/spectrum.dart'
     show SpectrumSource, RetryableSpectrumSource, getPlatformSpectrum;
 import '../../../core/state/app_providers.dart';
 import '../../../core/state/auth_provider.dart';
+import '../../../core/state/channel_provider.dart';
 import '../../../core/state/station_provider.dart';
 import '../../../core/theme/thmr_theme.dart';
 import '../../../shared/widgets/thmr_panel.dart';
@@ -21,7 +23,7 @@ import '../../../shared/widgets/volume_wheel_control.dart';
 import 'bitrate_row.dart';
 import 'feedback_sheet.dart';
 
-/// 正在放送面板:封面 + 曲名 + 直播进度 + 控制排(收藏 / 播放 / 反馈)+ 投票。
+/// 正在放送面板:封面 + 曲名 + 直播进度 + 控制排(收藏 / 播放 / 反馈)。
 ///
 /// 重建范围刻意收窄:本面板只订阅低频状态(电台 10s 轮询、收藏状态);
 /// 秒级变化由 [_PlayBar] / [_VolumeControl] / [_PlaybackError] 各自窄订阅,
@@ -55,7 +57,8 @@ class _NowPlayingPanelState extends ConsumerState<NowPlayingPanel> {
       return;
     }
     final api = ref.read(authProvider.notifier).api;
-    final fs = ref.read(favoritesStatusProvider).valueOrNull;
+    final stationId = widget.status.station.id;
+    final fs = ref.read(favoritesStatusProvider).asData?.value;
     try {
       if (fs != null &&
           fs.favorited &&
@@ -79,7 +82,7 @@ class _NowPlayingPanelState extends ConsumerState<NowPlayingPanel> {
           defaultCid = cols.first.id;
         }
         await api.addToCollection(defaultCid,
-            stationId: appConfig.stationId, trackId: cur.trackId);
+            stationId: stationId, trackId: cur.trackId);
       }
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -98,20 +101,18 @@ class _NowPlayingPanelState extends ConsumerState<NowPlayingPanel> {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('网络异常,稍后再试')));
     } finally {
-      ref.invalidate(favoritesStatusProvider);
-      ref.invalidate(collectionsProvider);
+      if (mounted) {
+        ref.invalidate(favoritesStatusProvider);
+        ref.invalidate(collectionsProvider);
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final cur = widget.status.current;
-    final meta = ref.watch(metaProvider).valueOrNull;
-    // 与 Web 端对齐:功能开关 + meta 阈值 双条件
-    final voteEnabled =
-        appConfig.featuresVote && (meta?.voteThreshold ?? 0) > 0;
     final favorited = ref.watch(favoritesStatusProvider
-        .select((v) => v.valueOrNull?.favorited ?? false));
+        .select((v) => v.asData?.value.favorited ?? false));
 
     return ThmrPanel(
       padding: const EdgeInsets.all(16),
@@ -131,7 +132,11 @@ class _NowPlayingPanelState extends ConsumerState<NowPlayingPanel> {
                   onFavorite: cur == null ? null : () => _toggleFavorite(cur),
                   onFeedback: cur == null
                       ? null
-                      : () => showFeedbackSheet(context, track: cur),
+                      : () => showFeedbackSheet(
+                            context,
+                            track: cur,
+                            stationId: widget.status.station.id,
+                          ),
                 ),
               ),
             ],
@@ -148,10 +153,6 @@ class _NowPlayingPanelState extends ConsumerState<NowPlayingPanel> {
             Divider(color: Theme.of(context).thmr.panelBorder),
             const SizedBox(height: 2),
             const BitrateRow(),
-          ],
-          if (voteEnabled) ...[
-            const SizedBox(height: 12),
-            const Center(child: _VoteStrip()),
           ],
         ],
       ),
@@ -225,8 +226,6 @@ class NowPlayingTrackInfo extends ConsumerWidget {
   final VoidCallback? onFavorite;
   final VoidCallback? onFeedback;
 
-  static final GlobalKey _favKey = GlobalKey();
-
   Future<void> _copyTrackInfo(BuildContext context) async {
     final track = cur;
     if (track == null) return;
@@ -240,7 +239,8 @@ class NowPlayingTrackInfo extends ConsumerWidget {
 
   Future<void> _handleFavoriteTap(BuildContext context, WidgetRef ref) async {
     if (cur == null || onFavorite == null) return;
-    final fs = ref.read(favoritesStatusProvider).valueOrNull;
+    final stationId = ref.read(activeStationIdProvider);
+    final fs = ref.read(favoritesStatusProvider).asData?.value;
     final cols = fs?.collections ?? const <FavCollectionRef>[];
     // Single collection (or unknown): keep the direct toggle path.
     if (cols.length <= 1) {
@@ -248,7 +248,7 @@ class NowPlayingTrackInfo extends ConsumerWidget {
       return;
     }
     // Multiple collections: anchored pick menu, mirrors web fav-menu.
-    final box = _favKey.currentContext?.findRenderObject() as RenderBox?;
+    final box = context.findRenderObject() as RenderBox?;
     if (box == null || !box.attached) {
       onFavorite!();
       return;
@@ -307,8 +307,9 @@ class NowPlayingTrackInfo extends ConsumerWidget {
         await api.removeItem(picked.collectionId, picked.itemId!);
       } else {
         await api.addToCollection(picked.collectionId,
-            stationId: appConfig.stationId, trackId: cur!.trackId);
+            stationId: stationId, trackId: cur!.trackId);
       }
+      if (!context.mounted) return;
       ref.invalidate(favoritesStatusProvider);
       ref.invalidate(collectionsProvider);
     } on ApiException catch (e) {
@@ -376,13 +377,14 @@ class NowPlayingTrackInfo extends ConsumerWidget {
           spacing: 6,
           runSpacing: 6,
           children: [
-            _TextAction(
-              key: _favKey,
-              label: favorited ? '已收藏' : '收藏',
-              active: favorited,
-              onTap: onFavorite == null
-                  ? null
-                  : () => _handleFavoriteTap(context, ref),
+            Builder(
+              builder: (buttonContext) => _TextAction(
+                label: favorited ? '已收藏' : '收藏',
+                active: favorited,
+                onTap: onFavorite == null
+                    ? null
+                    : () => _handleFavoriteTap(buttonContext, ref),
+              ),
             ),
             _TextAction(label: '反馈', onTap: onFeedback),
             _TextAction(
@@ -399,7 +401,6 @@ class NowPlayingTrackInfo extends ConsumerWidget {
 /// small bordered text button, mirrors web .track-feedback-button.
 class _TextAction extends StatelessWidget {
   const _TextAction({
-    super.key,
     required this.label,
     this.active = false,
     this.onTap,
@@ -450,9 +451,8 @@ class _PlayBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final tokens = Theme.of(context).thmr;
     final scheme = Theme.of(context).colorScheme;
-    // 窄订阅:仅相位 / 收听秒数变化才重建本条
+    // Only phase changes rebuild the controls; the clock owns its second tick.
     final phase = ref.watch(playbackProvider.select((s) => s.phase));
-    final elapsed = ref.watch(playbackProvider.select((s) => s.listenedSec));
     final busy = phase == PlaybackPhase.connecting ||
         phase == PlaybackPhase.reconnecting;
     final playing =
@@ -479,15 +479,9 @@ class _PlayBar extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              SizedBox(
+              const SizedBox(
                 width: 52,
-                child: Text(
-                  formatDuration(elapsed),
-                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+                child: _ListeningClock(),
               ),
               const SizedBox(width: 12),
               Expanded(child: AudioStrip(playing: playing, busy: busy)),
@@ -502,6 +496,22 @@ class _PlayBar extends ConsumerWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ListeningClock extends ConsumerWidget {
+  const _ListeningClock();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final elapsed = ref.watch(playbackProvider.select((s) => s.listenedSec));
+    return Text(
+      formatDuration(elapsed),
+      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+        fontFeatures: const [FontFeature.tabularFigures()],
+        fontWeight: FontWeight.w700,
       ),
     );
   }
@@ -532,10 +542,26 @@ class _AudioStripState extends State<AudioStrip>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final Ticker _ticker = createTicker(_onTick);
   late final SpectrumSource? _cap = widget.source ?? getPlatformSpectrum();
+  final _frames = ValueNotifier(0);
   List<double> _values = [];
   Duration _last = Duration.zero;
   bool _capturing = false;
-  bool _foreground = true;
+  bool _unavailable = false;
+
+  bool get _canAnimate {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (state == null || state == AppLifecycleState.resumed) return true;
+    // Desktop windows remain visible when another window takes input focus.
+    // Keep sampling until the window is actually hidden/minimized.
+    return state == AppLifecycleState.inactive &&
+        switch (defaultTargetPlatform) {
+          TargetPlatform.windows ||
+          TargetPlatform.linux ||
+          TargetPlatform.macOS =>
+            true,
+          _ => false,
+        };
+  }
 
   @override
   void initState() {
@@ -556,8 +582,7 @@ class _AudioStripState extends State<AudioStrip>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
-    if (_foreground && widget.playing) {
+    if (_canAnimate && widget.playing) {
       _begin();
     } else {
       _stopCapture();
@@ -574,7 +599,7 @@ class _AudioStripState extends State<AudioStrip>
   }
 
   void _begin() {
-    if (_cap == null || !_foreground || !TickerMode.valuesOf(context).enabled) {
+    if (_cap == null || !_canAnimate || !TickerMode.valuesOf(context).enabled) {
       return;
     }
     if (!_capturing) {
@@ -624,7 +649,15 @@ class _AudioStripState extends State<AudioStrip>
       _ticker.stop();
       _last = Duration.zero;
     }
-    if (mounted) setState(() {});
+    final source = _cap;
+    final unavailable =
+        source is RetryableSpectrumSource && source.isUnavailable;
+    if (unavailable != _unavailable) {
+      setState(() => _unavailable = unavailable);
+    }
+    // The envelope updates pixels only. Keep layout, buttons and semantics out
+    // of the ~20 Hz path, including on high refresh rate displays.
+    _frames.value++;
   }
 
   void _step() {
@@ -650,6 +683,7 @@ class _AudioStripState extends State<AudioStrip>
     WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _stopCapture();
+    _frames.dispose();
     super.dispose();
   }
 
@@ -664,6 +698,7 @@ class _AudioStripState extends State<AudioStrip>
         _values = List.generate(count, (i) => i < old.length ? old[i] : 0.08);
       }
       final retryable = _cap is RetryableSpectrumSource ? _cap : null;
+      _unavailable = retryable?.isUnavailable ?? false;
       final needsAction =
           widget.playing && retryable != null && retryable.isUnavailable;
       return RepaintBoundary(
@@ -676,6 +711,7 @@ class _AudioStripState extends State<AudioStrip>
                   values: _values,
                   color: accent,
                   playing: widget.playing,
+                  repaint: _frames,
                 ),
                 child: const SizedBox(width: double.infinity, height: 36),
               ),
@@ -713,7 +749,8 @@ class _SpectrumPainter extends CustomPainter {
     required this.values,
     required this.color,
     required this.playing,
-  });
+    required Listenable repaint,
+  }) : super(repaint: repaint);
 
   final List<double> values;
   final Color color;
@@ -746,9 +783,12 @@ class _SpectrumPainter extends CustomPainter {
     }
   }
 
-  // values mutate in place; repaint whenever the widget rebuilds.
+  // In-place envelope changes arrive through the repaint Listenable.
   @override
-  bool shouldRepaint(_SpectrumPainter oldDelegate) => true;
+  bool shouldRepaint(_SpectrumPainter oldDelegate) =>
+      values != oldDelegate.values ||
+      color != oldDelegate.color ||
+      playing != oldDelegate.playing;
 }
 
 /// 播放错误条:窄订阅,仅在错误出现/消失时重建。
@@ -936,92 +976,5 @@ class _VolumeSheet extends ConsumerWidget {
         ),
       ),
     );
-  }
-}
-
-class _VoteStrip extends ConsumerStatefulWidget {
-  const _VoteStrip();
-
-  @override
-  ConsumerState<_VoteStrip> createState() => _VoteStripState();
-}
-
-class _VoteStripState extends ConsumerState<_VoteStrip> {
-  bool _busy = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final vote = ref.watch(voteStatusProvider);
-    final tokens = Theme.of(context).thmr;
-    final v = vote.valueOrNull;
-    final round = v?.round;
-    final theme = Theme.of(context);
-
-    final content = Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(Icons.bolt_rounded,
-            size: 18,
-            color: (v?.myVote ?? false)
-                ? theme.colorScheme.primary
-                : tokens.mutedInk),
-        const SizedBox(width: 6),
-        Text(
-          round == null
-              ? '投票切歌暂不可用'
-              : '切歌投票 ${round.votes}/${round.threshold}'
-                  '${round.actionTaken ? ' · 已触发切歌' : ''}',
-          style: theme.textTheme.labelMedium?.copyWith(
-            color: round == null ? tokens.mutedInk : tokens.ink,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(width: 10),
-        if (round != null && !round.actionTaken)
-          TextButton(
-            onPressed: _busy ? null : () => _cast(v?.myVote ?? false),
-            child: Text(v?.myVote ?? false ? '取消' : '投一票'),
-          ),
-      ],
-    );
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: tokens.panelSoft,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: tokens.panelBorder),
-      ),
-      child: content,
-    );
-  }
-
-  Future<void> _cast(bool mine) async {
-    setState(() => _busy = true);
-    try {
-      final auth = ref.read(authProvider);
-      if (!auth.signedIn) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('登录后即可参与切歌投票')));
-        return;
-      }
-      final api = ref.read(authProvider.notifier).api;
-      if (mine) {
-        await api.cancelVote(appConfig.stationId);
-      } else {
-        await api.castVote(appConfig.stationId);
-      }
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('投票失败:${e.message}')));
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('网络异常,稍后再试')));
-    } finally {
-      if (mounted) setState(() => _busy = false);
-      ref.invalidate(voteStatusProvider);
-    }
   }
 }

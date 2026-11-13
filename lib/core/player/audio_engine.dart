@@ -2,6 +2,8 @@
 // platform glue that keeps playback alive in the background:
 //   - Android / iOS : audio_service foreground service + notification
 //   - Windows       : SMTC (system media transport controls)
+//   - macOS         : Now Playing info center + remote commands (media keys)
+//   - Linux         : MPRIS over D-Bus
 
 import 'dart:async';
 import 'dart:io' show Directory, File, Platform;
@@ -14,6 +16,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:smtc_windows/smtc_windows.dart';
 import '../platform/desktop_window.dart';
 import 'linux_media_controls.dart';
+import 'macos_media_controls.dart';
 
 /// The single player instance shared by the UI controller and the
 /// background handler.
@@ -191,11 +194,20 @@ final _linuxMedia = LinuxMediaControls(
 );
 StreamSubscription<double>? _linuxVolumeSubscription;
 
+final _macosMedia = MacosMediaControls(
+  play: _playFromSystem,
+  pause: _pauseFromSystem,
+  stop: _stopFromSystem,
+);
+
 Future<void> disposeSystemMediaControls() async {
   if (!kIsWeb && Platform.isLinux) {
     await _linuxVolumeSubscription?.cancel();
     _linuxVolumeSubscription = null;
     await _linuxMedia.dispose();
+  }
+  if (!kIsWeb && Platform.isMacOS) {
+    await _macosMedia.dispose();
   }
 }
 
@@ -277,6 +289,17 @@ Future<void> updateSystemMediaMetadata({
     });
     return;
   }
+  if (!kIsWeb && Platform.isMacOS) {
+    await _macosMedia.update({
+      'status': enginePlayer.state.playing ? 'Playing' : 'Paused',
+      'title': title,
+      'artist': artist,
+      'artwork': artUri ?? '',
+      'duration': durationSec.clamp(0, 86400) * 1000000,
+      'position': positionSec.clamp(0, 86400) * 1000000,
+    });
+    return;
+  }
   if (kIsWeb || !Platform.isWindows) return;
   final serial = ++_metadataSerial;
   await _smtcInit();
@@ -298,6 +321,7 @@ Future<void> updateSystemMediaMetadata({
         thumbnail: thumb,
       ));
     } catch (_) {
+      if (serial != _metadataSerial) return;
       if (thumb == fallback) rethrow;
       await _smtc!.updateMetadata(MusicMetadata(
         title: title,
@@ -306,6 +330,7 @@ Future<void> updateSystemMediaMetadata({
         thumbnail: fallback,
       ));
     }
+    if (serial != _metadataSerial) return;
     await _smtc!.setPlaybackStatus(enginePlayer.state.playing
         ? PlaybackStatus.playing
         : PlaybackStatus.paused);
@@ -322,6 +347,13 @@ Future<void> updateSystemMediaTimeline({
 }) async {
   if (!kIsWeb && Platform.isLinux) {
     await _linuxMedia.update({
+      'position': positionSec.clamp(0, 86400) * 1000000,
+      'duration': durationSec.clamp(0, 86400) * 1000000,
+    });
+    return;
+  }
+  if (!kIsWeb && Platform.isMacOS) {
+    await _macosMedia.update({
       'position': positionSec.clamp(0, 86400) * 1000000,
       'duration': durationSec.clamp(0, 86400) * 1000000,
     });
@@ -355,12 +387,24 @@ Future<void> clearSystemMediaMetadata() async {
     });
     return;
   }
+  if (!kIsWeb && Platform.isMacOS) {
+    await _macosMedia.update({
+      'status': 'Stopped',
+      'title': '',
+      'artist': '',
+      'artwork': '',
+      'position': 0,
+      'duration': 0,
+    });
+    return;
+  }
   if (kIsWeb || !Platform.isWindows) return;
-  ++_metadataSerial;
+  final serial = ++_metadataSerial;
   await _smtcInit();
-  if (!_smtcReady) return;
+  if (!_smtcReady || serial != _metadataSerial) return;
   try {
     await _smtc!.clearMetadata();
+    if (serial != _metadataSerial) return;
     await _smtc!.setPlaybackStatus(PlaybackStatus.stopped);
   } catch (error) {
     debugPrint('Windows media clear failed: $error');
@@ -373,6 +417,16 @@ Future<void> updateSystemMediaPlayback({
 }) async {
   if (!kIsWeb && Platform.isLinux) {
     await _linuxMedia.update({
+      'status': playing
+          ? 'Playing'
+          : stopped
+              ? 'Stopped'
+              : 'Paused',
+    });
+    return;
+  }
+  if (!kIsWeb && Platform.isMacOS) {
+    await _macosMedia.update({
       'status': playing
           ? 'Playing'
           : stopped
@@ -419,6 +473,8 @@ Future<void> initBackgroundAudio() async {
     });
   } else if (Platform.isWindows) {
     await _smtcInit();
+  } else if (Platform.isMacOS) {
+    await _macosMedia.start();
   } else if (Platform.isLinux) {
     await _linuxMedia.start();
     await _linuxMedia.update({'volume': enginePlayer.state.volume / 100});

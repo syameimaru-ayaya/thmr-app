@@ -4,9 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../player/audio_engine.dart';
 import '../api/radio_api.dart';
-import '../config.dart';
 import '../models/models.dart';
+import 'channel_provider.dart';
 import 'settings_provider.dart';
+import 'radio_source_provider.dart';
 
 /// 电台运行时 UI 状态。
 class StationUiState {
@@ -15,7 +16,7 @@ class StationUiState {
   final bool initialLoading;
 
   /// 换曲计数:`current.trackId` 或 `startedAtMs` 变化时 +1,
-  /// 驱动收藏状态 / 投票轮次等跟随刷新。
+  /// 驱动投票轮次跟随刷新。
   final int trackGeneration;
 
   /// 最近一次成功轮询时间(展示「更新于 …」)。
@@ -89,9 +90,8 @@ class StationPoller extends StateNotifier<StationUiState> {
       _lastAppliedRequestId = requestId;
       var generation = state.trackGeneration;
       final cur = s.current;
-      if (cur != null &&
-          (cur.trackId != _lastTrackId ||
-              cur.startedAtMs != _lastStartedAtMs)) {
+      if (cur?.trackId != _lastTrackId ||
+          cur?.startedAtMs != _lastStartedAtMs) {
         generation++;
       }
       final mediaSignature = cur == null
@@ -105,7 +105,7 @@ class StationPoller extends StateNotifier<StationUiState> {
         unawaited(clearSystemMediaMetadata());
         audioHandler.clearNowPlaying();
       } else if (cur != null && mediaChanged) {
-        final artwork = absolutizeCover(cur.coverUrl, appConfig.radioBaseUrl);
+        final artwork = absolutizeCover(cur.coverUrl, _api.baseUrl);
         // Windows SMTC and mobile lock-screen metadata share the same track.
         unawaited(updateSystemMediaMetadata(
             trackId: '${cur.trackId}-${cur.startedAtMs}',
@@ -163,15 +163,22 @@ class StationPoller extends StateNotifier<StationUiState> {
 }
 
 final stationProvider = StateNotifierProvider<StationPoller, StationUiState>(
-  (ref) => StationPoller(RadioApi(), appConfig.stationId),
+  (ref) => StationPoller(
+    ref.watch(radioApiProvider),
+    ref.watch(activeStationIdProvider),
+  ),
 );
 
 /// 直播流地址:状态接口可用 + 用户码率偏好 → 完整 URL。
+/// 自动测速未完成时也返回当前(暂定)来源的地址,手动播放无需等待测速;
+/// 自动连播在 home_shell 另行等待测速完成,避免连上后再重连。
 final streamUrlProvider = Provider<String?>((ref) {
+  final stationId = ref.watch(activeStationIdProvider);
   final st = ref.watch(stationProvider);
-  final status = st.status;
-  if (status == null) return null;
-  final prefs = ref.watch(settingsProvider);
-  final profile = st.selectedProfile(prefs.bitrateFor(appConfig.stationId));
-  return RadioApi().streamUrl(appConfig.stationId, profile.id);
+  if (st.status?.station.id != stationId) return null;
+  final preferred =
+      ref.watch(settingsProvider.select((s) => s.bitrateFor(stationId)));
+  final profile = st.selectedProfile(preferred);
+  // radioApiProvider follows the selected source, so this rebuilds on switch.
+  return ref.watch(radioApiProvider).streamUrl(stationId, profile.id);
 });
